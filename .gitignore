@@ -1,0 +1,22 @@
+# 仮想環境・データ・参照資料・管理対象外ファイル
+venv/
+datasets/
+ref/
+fedsso/
+moq/
+common.md
+prompt.md
+
+# 隠しファイル（.gitignore 自体は追跡対象とする）
+.*
+!.gitignore
+
+# Python キャッシュ・生成物
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.ipynb_checkpoints/
+.mplconfig/
+*.log
+*.tmp

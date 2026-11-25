@@ -208,14 +208,18 @@ def evaluate_nn(
     y_train: torch.Tensor,
     X_test: torch.Tensor,
     y_test: torch.Tensor,
+    eval_train: bool = True,
 ) -> Tuple[float, float]:
     """非凸ニューラルネットワークの訓練損失とテスト精度を評価する。"""
     if torch.isnan(x_vec).any() or torch.isinf(x_vec).any():
         return float("nan"), 0.098
     set_flat_params(model, x_vec)
     model.eval()
-    logits_tr = model(X_train[:15000])
-    train_loss = float(nn.functional.cross_entropy(logits_tr, y_train[:15000]).item())
+    if eval_train:
+        logits_tr = model(X_train[:15000])
+        train_loss = float(nn.functional.cross_entropy(logits_tr, y_train[:15000]).item())
+    else:
+        train_loss = float("nan")
     logits_te = model(X_test)
     test_acc = float((logits_te.argmax(dim=1) == y_test).float().mean().item())
     return train_loss, test_acc
@@ -413,6 +417,8 @@ def run_fedsso_moq_nn(
     max_step_norm: float = 15.0,
     seed: int = 42,
     eval_final_only: bool = False,
+    eval_train_final_only: bool = False,
+    measure_server_time: bool = True,
 ) -> Dict[str, Any]:
     """
     非凸モデル (CompactCNN) における FedSSO および FedSSO + MoQファミリー全手法の統一実行。
@@ -475,7 +481,7 @@ def run_fedsso_moq_nn(
         v_agg = batched_cnn_local_sgd(x, packed_clients, tau=tau, batch_size=batch_size, lr=lr)
         cum_comm += 1
 
-        if device.type == "cuda":
+        if measure_server_time and device.type == "cuda":
             torch.cuda.synchronize()
         ts = time.perf_counter()
 
@@ -513,7 +519,7 @@ def run_fedsso_moq_nn(
             else:
                 mu_k = mu
 
-        if device.type == "cuda":
+        if measure_server_time and device.type == "cuda":
             torch.cuda.synchronize()
         server_time_ms += (time.perf_counter() - ts) * 1000.0
 
@@ -523,23 +529,23 @@ def run_fedsso_moq_nn(
             x_look = x + mu_k * vel
             v_look = batched_cnn_local_sgd(x_look, packed_clients, tau=tau, batch_size=batch_size, lr=lr)
             cum_comm += 1
-            if device.type == "cuda":
+            if measure_server_time and device.type == "cuda":
                 torch.cuda.synchronize()
             ts2 = time.perf_counter()
             g_base = (x_look - v_look) / (lr * tau)
-            if device.type == "cuda":
+            if measure_server_time and device.type == "cuda":
                 torch.cuda.synchronize()
             server_time_ms += (time.perf_counter() - ts2) * 1000.0
         else:
-            if device.type == "cuda":
+            if measure_server_time and device.type == "cuda":
                 torch.cuda.synchronize()
             ts2 = time.perf_counter()
             g_base = (1.0 + mu_k) * g_k - mu_k * g_prev
-            if device.type == "cuda":
+            if measure_server_time and device.type == "cuda":
                 torch.cuda.synchronize()
             server_time_ms += (time.perf_counter() - ts2) * 1000.0
 
-        if device.type == "cuda":
+        if measure_server_time and device.type == "cuda":
             torch.cuda.synchronize()
         ts3 = time.perf_counter()
 
@@ -573,12 +579,15 @@ def run_fedsso_moq_nn(
             g_base_prev = g_base.clone()
             s_prev = (eta * d_k).clone()
 
-        if device.type == "cuda":
+        if measure_server_time and device.type == "cuda":
             torch.cuda.synchronize()
         server_time_ms += (time.perf_counter() - ts3) * 1000.0
 
         if (not eval_final_only) or (k == rounds):
-            loss, acc = evaluate_nn(model, x, X_train, y_train, X_test, y_test)
+            loss, acc = evaluate_nn(
+                model, x, X_train, y_train, X_test, y_test,
+                eval_train=(not eval_train_final_only) or (k == rounds),
+            )
         else:
             loss, acc = float("nan"), float("nan")
         losses.append(loss)

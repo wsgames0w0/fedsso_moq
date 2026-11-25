@@ -63,13 +63,13 @@ def run_momentum_sensitivity_study(
     packed_mclr, X_tr_m, y_tr_m, X_te_m, y_te_m,
     packed_cnn, X_tr_c, y_tr_c, X_te_c, y_te_c,
     seeds: List[int] = DEFAULT_SEEDS,
-    rounds_mclr: int = 100,
-    rounds_cnn: int = 100,
+    rounds_mclr: int = 200,
+    rounds_cnn: int = 200,
 ) -> pd.DataFrame:
     """
     実験 3A: 慣性係数 mu (MoQ/NAQ) および上限キャップ max_mu (AdaMoQ/AdaNAQ) の感度分析。
     mu, max_mu in {0.1, 0.2, ..., 0.9} に加え、基準線 FedSSO (mu=0.0) を
-    MCLR (100r, 10シード) および CompactCNN (100r, 10シード) で比較する。
+    MCLR (200r, 10シード) および CompactCNN (200r, 10シード) で比較する。
     """
     rows: List[Dict[str, Any]] = []
     mus = [round(0.1 * i, 1) for i in range(1, 10)]
@@ -84,7 +84,7 @@ def run_momentum_sensitivity_study(
     for mm in mus:
         configs.append(("FedSSO-AdaNAQ", 0.0, mm))
 
-    pbar = tqdm(total=len(configs) * 2 * len(seeds), desc="Exp 3A: Momentum Sensitivity (MoQ & NAQ)")
+    pbar = tqdm(total=len(configs) * 2 * len(seeds), desc="Exp 3A: Momentum Sensitivity (MoQ & NAQ, 200r)")
 
     def _run_model(model_label: str, rounds_n: int, lr_val: float, eta_val: float) -> None:
         for algo, mu_val, max_mu_val in configs:
@@ -96,14 +96,14 @@ def run_momentum_sensitivity_study(
                         algo=algo, packed_clients=packed_mclr,
                         X_train=X_tr_m, y_train=y_tr_m, X_test=X_te_m, y_test=y_te_m,
                         rounds=rounds_n, lr=lr_val, eta=eta_val, mu=mu_val, max_mu=max_mu_val,
-                        seed=s, eval_final_only=True,
+                        seed=s, eval_final_only=True, measure_server_time=False,
                     )
                 else:
                     r = ex2_utils.run_fedsso_moq_nn(
                         algo=algo, model_cls=ex2_model.CompactCNN, packed_clients=packed_cnn,
                         X_train=X_tr_c, y_train=y_tr_c, X_test=X_te_c, y_test=y_te_c,
                         rounds=rounds_n, lr=lr_val, eta=eta_val, mu=mu_val, max_mu=max_mu_val,
-                        seed=s, eval_final_only=True,
+                        seed=s, eval_final_only=True, measure_server_time=False,
                     )
                 f_acc = float(r["test_acc"][-1])
                 f_loss = float(r["train_loss"][-1])
@@ -145,16 +145,16 @@ def run_memory_size_study(
     ex1_utils,
     packed_mclr, X_tr_m, y_tr_m, X_te_m, y_te_m,
     seeds: List[int] = DEFAULT_SEEDS,
-    rounds: int = 150,
+    rounds: int = 200,
     m_values: Tuple[int, ...] = (1, 2, 4, 8, 16, 32),
 ) -> pd.DataFrame:
     """
     実験 3B: 記憶制限準ニュートン法 (FedSSO-LBFGS, FedSSO-LNAQ, FedSSO-LMoQ) の
-    履歴数 m in {1, 2, 4, 8, 16, 32} の影響分析 (MCLR, 150ラウンド, 10シード)。
+    履歴数 m in {1, 2, 4, 8, 16, 32} の影響分析 (MCLR, 200ラウンド, 10シード)。
     """
     algos = ["FedSSO-LBFGS", "FedSSO-LNAQ", "FedSSO-LMoQ"]
     rows: List[Dict[str, Any]] = []
-    pbar = tqdm(total=len(algos) * len(m_values) * len(seeds), desc="Exp 3B: Memory Size m (2^0..2^5)")
+    pbar = tqdm(total=len(algos) * len(m_values) * len(seeds), desc="Exp 3B: Memory Size m (2^0..2^5, 200r)")
 
     for algo in algos:
         for m in m_values:
@@ -164,7 +164,7 @@ def run_memory_size_study(
                     algo=algo, packed_clients=packed_mclr,
                     X_train=X_tr_m, y_train=y_tr_m, X_test=X_te_m, y_test=y_te_m,
                     rounds=rounds, lr=0.001, eta=1.0, max_mu=0.4, m_size=m,
-                    seed=s, eval_final_only=True,
+                    seed=s, eval_final_only=True, measure_server_time=True,
                 )
                 accs.append(r["test_acc"][-1])
                 losses.append(r["train_loss"][-1])
@@ -196,11 +196,11 @@ def run_curvature_ablation_study(
     ex2_utils,
     packed_cnn, X_tr_c, y_tr_c, X_te_c, y_te_c,
     seeds: List[int] = DEFAULT_SEEDS,
-    rounds: int = 100,
+    rounds: int = 200,
 ) -> Tuple[pd.DataFrame, Dict[str, np.ndarray]]:
     """
     実験 3C: 正定値性保証（曲率クリッピング lam, Lam）のアブレーション検証。
-    非凸 CompactCNN (100r, 10シード) において MoQ系 + NAQ系 全7手法で 4 条件を比較する。
+    非凸 CompactCNN (200r, 10シード) において MoQ系 + NAQ系 全7手法で 4 条件を比較する。
     """
     algos = [
         "FedSSO",
@@ -216,7 +216,7 @@ def run_curvature_ablation_study(
 
     rows: List[Dict[str, Any]] = []
     curves: Dict[str, np.ndarray] = {}
-    pbar = tqdm(total=len(algos) * len(conditions) * len(seeds), desc="Exp 3C: Curvature Ablation")
+    pbar = tqdm(total=len(algos) * len(conditions) * len(seeds), desc="Exp 3C: Curvature Ablation (200r)")
 
     for algo in algos:
         for c in conditions:
@@ -228,7 +228,8 @@ def run_curvature_ablation_study(
                     algo=algo, model_cls=ex2_model.CompactCNN, packed_clients=packed_cnn,
                     X_train=X_tr_c, y_train=y_tr_c, X_test=X_te_c, y_test=y_te_c,
                     rounds=rounds, lr=0.07, eta=0.3, mu=0.25, max_mu=0.30,
-                    lam=c["lam"], Lam=c["Lam"], enforce_pd=c["enforce_pd"], seed=s
+                    lam=c["lam"], Lam=c["Lam"], enforce_pd=c["enforce_pd"], seed=s,
+                    eval_final_only=False, eval_train_final_only=True, measure_server_time=False,
                 )
                 f_acc = r["test_acc"][-1]
                 f_loss = r["train_loss"][-1]

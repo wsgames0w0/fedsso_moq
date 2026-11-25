@@ -517,6 +517,7 @@ def run_fedsso_moq_mclr(
     l2_reg: float = 1e-4,
     seed: int = 42,
     eval_final_only: bool = False,
+    measure_server_time: bool = True,
 ) -> Dict[str, Any]:
     """
     FedSSO および FedSSO + MoQファミリー（NAQ, MoQ, AdaNAQ, AdaMoQ, LNAQ, LMoQ, MLNAQ, MLMoQ, LBFGS）
@@ -579,7 +580,7 @@ def run_fedsso_moq_mclr(
         v_agg = batched_mclr_local_sgd(x, packed_clients, tau=tau, batch_size=batch_size, lr=lr, l2_reg=l2_reg)
         cum_comm += 1
 
-        if X_train.device.type == "cuda":
+        if measure_server_time and X_train.device.type == "cuda":
             torch.cuda.synchronize()
         ts = time.perf_counter()
 
@@ -618,7 +619,7 @@ def run_fedsso_moq_mclr(
         else:
             mu_k = mu
 
-        if X_train.device.type == "cuda":
+        if measure_server_time and X_train.device.type == "cuda":
             torch.cuda.synchronize()
         server_time_ms += (time.perf_counter() - ts) * 1000.0
 
@@ -630,25 +631,25 @@ def run_fedsso_moq_mclr(
             x_look = x + mu_k * vel
             v_look = batched_mclr_local_sgd(x_look, packed_clients, tau=tau, batch_size=batch_size, lr=lr, l2_reg=l2_reg)
             cum_comm += 1
-            if X_train.device.type == "cuda":
+            if measure_server_time and X_train.device.type == "cuda":
                 torch.cuda.synchronize()
             ts2 = time.perf_counter()
             g_base = (x_look - v_look) / (lr * tau)
-            if X_train.device.type == "cuda":
+            if measure_server_time and X_train.device.type == "cuda":
                 torch.cuda.synchronize()
             server_time_ms += (time.perf_counter() - ts2) * 1000.0
         else:
             # MoQ系はサーバ側のみで線形外挿 (追加通信ゼロ)
-            if X_train.device.type == "cuda":
+            if measure_server_time and X_train.device.type == "cuda":
                 torch.cuda.synchronize()
             ts2 = time.perf_counter()
             g_base = (1.0 + mu_k) * g_k - mu_k * g_prev
-            if X_train.device.type == "cuda":
+            if measure_server_time and X_train.device.type == "cuda":
                 torch.cuda.synchronize()
             server_time_ms += (time.perf_counter() - ts2) * 1000.0
 
         # 5. 探索方向 d_k の計算とモデル更新
-        if X_train.device.type == "cuda":
+        if measure_server_time and X_train.device.type == "cuda":
             torch.cuda.synchronize()
         ts3 = time.perf_counter()
 
@@ -677,7 +678,7 @@ def run_fedsso_moq_mclr(
         g_base_prev = g_base.clone()
         s_prev = (eta * d_k).clone()
 
-        if X_train.device.type == "cuda":
+        if measure_server_time and X_train.device.type == "cuda":
             torch.cuda.synchronize()
         server_time_ms += (time.perf_counter() - ts3) * 1000.0
 

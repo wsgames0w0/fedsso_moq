@@ -1,3 +1,4 @@
+import glob
 import math
 import os
 import tempfile
@@ -628,11 +629,24 @@ def run_multiseed_cnn(
     batch_size: int = 100,
     targets: Tuple[float, ...] = (0.80, 0.90, 0.95, 0.97),
     param_dim: int = 6230,
+    save_log_dir: Optional[str] = None,
+    history_csv_path: Optional[str] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Dict[str, Any]]]:
-    """非凸 CompactCNN に対する複数シード (10シード) 実験を実行し統計表と曲線集計を返す。"""
+    """
+    非凸 CompactCNN に対する複数シード (10シード) 実験を実行し統計表と曲線集計を返す。
+    save_log_dir / history_csv_path を指定すると、シード別・アルゴリズム別の全ラウンド推移CSVを保存する。
+    """
     bytes_per_comm = param_dim * 8  # FedSSO論文 Table 1 準拠 (49,840 B / round)
+    if save_log_dir:
+        os.makedirs(save_log_dir, exist_ok=True)
+    if history_csv_path:
+        parent_dir = os.path.dirname(os.path.abspath(history_csv_path))
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+
     per_seed_rows: List[Dict[str, Any]] = []
     summary_rows: List[Dict[str, Any]] = []
+    history_frames: List[pd.DataFrame] = []
     curves_dict: Dict[str, Dict[str, Any]] = {}
 
     total_jobs = len(algo_configs) * len(seeds)
@@ -684,6 +698,20 @@ def run_multiseed_cnn(
             seed_losses.append(res["train_loss"])
             seed_accs.append(res["test_acc"])
             seed_comms.append(res["comm_rounds"])
+
+            if save_log_dir or history_csv_path:
+                df_hist_seed = pd.DataFrame({
+                    "Algorithm": name,
+                    "Seed": int(s),
+                    "Round": np.arange(1, len(res["test_acc"]) + 1, dtype=int),
+                    "Comm_Round": [int(c) for c in res["comm_rounds"]],
+                    "Train_Loss": [float(v) for v in res["train_loss"]],
+                    "Test_Acc": [float(v) for v in res["test_acc"]],
+                })
+                if save_log_dir:
+                    df_hist_seed.to_csv(os.path.join(save_log_dir, f"{name}_seed{s}.csv"), index=False)
+                if history_csv_path:
+                    history_frames.append(df_hist_seed)
 
             f_loss = float(res["train_loss"][-1])
             f_acc = float(res["test_acc"][-1])
@@ -768,5 +796,128 @@ def run_multiseed_cnn(
             summary_row[f"Bytes@{t:.2f}_Ave"] = float(np.mean(cm_vals) * bytes_per_comm) if cm_vals else np.nan
         summary_rows.append(summary_row)
 
+    if history_csv_path and history_frames:
+        pd.concat(history_frames, ignore_index=True).to_csv(history_csv_path, index=False)
+
     pbar.close()
     return pd.DataFrame(summary_rows), pd.DataFrame(per_seed_rows), curves_dict
+
+
+DEFAULT_COLOR_MAP: Dict[str, str] = {
+    "FedAvg": "#7f7f7f",
+    "FedSSO": "#000000",
+    "FedSSO-NAQ": "#1f77b4",
+    "FedSSO-MoQ": "#d62728",
+    "FedSSO-AdaNAQ": "#17becf",
+    "FedSSO-AdaMoQ": "#ff7f0e",
+    "FedSSO-LBFGS": "#8c564b",
+    "FedSSO-LNAQ": "#9467bd",
+    "FedSSO-LMoQ": "#2ca02c",
+    "FedSSO-MLNAQ": "#bcbd22",
+    "FedSSO-MLMoQ": "#e377c2",
+}
+
+
+def load_cnn_history_csv(
+    history_csv_path: str = "../datasets/ex002_cnn_history.csv",
+    log_dir: str = "../datasets/ex002_cnn_logs",
+) -> pd.DataFrame:
+    """保存済みの CompactCNN 全履歴CSV（無ければシード別CSV群）を読み込む。"""
+    if history_csv_path and os.path.isfile(history_csv_path):
+        return pd.read_csv(history_csv_path)
+    if log_dir and os.path.isdir(log_dir):
+        files = sorted(glob.glob(os.path.join(log_dir, "*.csv")))
+        if files:
+            return pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
+    raise FileNotFoundError(
+        f"履歴CSVが見つかりません: history_csv_path={history_csv_path}, log_dir={log_dir}"
+    )
+
+
+def plot_filtered_cnn_results(
+    selected_algos: Optional[List[str]] = None,
+    selected_seeds: Optional[List[int]] = None,
+    history_csv_path: str = "../datasets/ex002_cnn_history.csv",
+    log_dir: str = "../datasets/ex002_cnn_logs",
+    x_axis: str = "round",
+    show_mean: bool = True,
+    save_path: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    保存済み CSV から特定のアルゴリズム・シード値のみに絞って CompactCNN の学習曲線（損失・精度）を描画する。
+
+    Parameters
+    ----------
+    selected_algos : 表示対象アルゴリズム名のリスト（None なら全手法）
+    selected_seeds : 表示対象シード値のリスト（None なら全シード）
+    x_axis         : "round" (グローバル反復数) または "comm" (累積通信ラウンド数)
+    show_mean      : 複数シード選択時に平均太線を表示するかどうか
+    save_path      : 画像保存先パス（None なら画面表示のみ）
+    """
+    setup_japanese_matplotlib()
+    df = load_cnn_history_csv(history_csv_path=history_csv_path, log_dir=log_dir)
+
+    if selected_algos is not None:
+        df = df[df["Algorithm"].isin(selected_algos)]
+    if selected_seeds is not None:
+        seed_ints = [int(s) for s in selected_seeds]
+        df = df[df["Seed"].isin(seed_ints)]
+    if df.empty:
+        raise ValueError("指定されたアルゴリズム・シード条件に一致するデータがありません。")
+
+    algos_present = (
+        [a for a in selected_algos if a in set(df["Algorithm"])]
+        if selected_algos is not None
+        else [a for a in ALGO_ORDER if a in set(df["Algorithm"])] + [a for a in sorted(df["Algorithm"].unique()) if a not in ALGO_ORDER]
+    )
+    seeds_present = sorted(int(s) for s in df["Seed"].unique())
+    x_col = "Comm_Round" if x_axis == "comm" else "Round"
+    x_label = "累積通信ラウンド数" if x_axis == "comm" else "グローバル反復数 (k)"
+
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5.6))
+    multi_seed = len(seeds_present) > 1
+    seed_linestyles = ["-", "--", "-.", ":"]
+
+    for algo in algos_present:
+        col = DEFAULT_COLOR_MAP.get(algo, "#333333")
+        sub_a = df[df["Algorithm"] == algo].sort_values(["Seed", "Round"])
+        for idx_s, s in enumerate(seeds_present):
+            sub_s = sub_a[sub_a["Seed"] == s]
+            if sub_s.empty:
+                continue
+            ls = seed_linestyles[idx_s % len(seed_linestyles)] if (multi_seed and len(seeds_present) <= 4) else "-"
+            lw = 1.1 if (multi_seed and show_mean) else 2.0
+            alpha = 0.55 if (multi_seed and show_mean) else 0.90
+            lbl = f"{algo} (seed={s})" if (not multi_seed or len(seeds_present) <= 3 or not show_mean) else None
+            axes[0].plot(sub_s[x_col], sub_s["Train_Loss"], color=col, linestyle=ls, linewidth=lw, alpha=alpha)
+            axes[1].plot(sub_s[x_col], sub_s["Test_Acc"], color=col, linestyle=ls, linewidth=lw, alpha=alpha, label=lbl)
+
+        if multi_seed and show_mean:
+            mean_df = sub_a.groupby("Round", as_index=False)[["Comm_Round", "Train_Loss", "Test_Acc"]].mean()
+            lbl_m = f"{algo} (Ave, {len(seeds_present)} seeds)"
+            axes[0].plot(mean_df[x_col], mean_df["Train_Loss"], color=col, linestyle="-", linewidth=2.3, alpha=0.95)
+            axes[1].plot(mean_df[x_col], mean_df["Test_Acc"], color=col, linestyle="-", linewidth=2.3, alpha=0.95, label=lbl_m)
+
+    seed_desc = f"Seed={seeds_present[0]}" if len(seeds_present) == 1 else f"Seeds={seeds_present}"
+    axes[0].set_title(f"(a) CompactCNN 訓練損失 絞り込み比較 ({seed_desc})", fontsize=11.5)
+    axes[0].set_xlabel(x_label, fontsize=10.5)
+    axes[0].set_ylabel("訓練損失 (Train Loss)", fontsize=10.5)
+    axes[0].set_yscale("log")
+    axes[0].grid(True, linestyle="--", alpha=0.4)
+
+    axes[1].set_title(f"(b) CompactCNN テスト精度 絞り込み比較 ({seed_desc})", fontsize=11.5)
+    axes[1].set_xlabel(x_label, fontsize=10.5)
+    axes[1].set_ylabel("テスト精度 (Test Accuracy)", fontsize=10.5)
+    axes[1].grid(True, linestyle="--", alpha=0.4)
+    handles, labels = axes[1].get_legend_handles_labels()
+    if handles:
+        axes[1].legend(loc="lower right", fontsize=8.5, ncol=1 if len(labels) <= 8 else 2, framealpha=0.92)
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.show()
+
+    max_round = df.groupby(["Algorithm", "Seed"])["Round"].transform("max")
+    final_df = df[df["Round"] == max_round][["Algorithm", "Seed", "Round", "Comm_Round", "Train_Loss", "Test_Acc"]].copy()
+    return final_df.sort_values(["Algorithm", "Seed"]).reset_index(drop=True)

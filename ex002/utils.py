@@ -4,7 +4,7 @@ import os
 import tempfile
 import time
 from collections import deque
-from typing import Any, Deque, Dict, List, Optional, Tuple, Type
+from typing import Any, Deque, Dict, List, Optional, Tuple, Type, Union
 
 if "MPLCONFIGDIR" not in os.environ:
     _mpl_dir = os.path.join(tempfile.gettempdir(), "fedsso_moq_mplconfig")
@@ -834,6 +834,21 @@ def load_cnn_history_csv(
     )
 
 
+def _resolve_mean_only_flag(
+    flag: Union[bool, str],
+    selected_seeds: Optional[List[int]],
+    param_name: str,
+) -> bool:
+    """'auto' / True / False を判定して平均のみモードの真偽値を返す。"""
+    if isinstance(flag, str):
+        if flag == "auto":
+            return selected_seeds is None
+        raise ValueError(f"{param_name} は True, False, または 'auto' を指定してください: {flag!r}")
+    if isinstance(flag, bool):
+        return flag
+    raise ValueError(f"{param_name} は True, False, または 'auto' を指定してください: {flag!r}")
+
+
 def plot_filtered_cnn_results(
     selected_algos: Optional[List[str]] = None,
     selected_seeds: Optional[List[int]] = None,
@@ -841,6 +856,8 @@ def plot_filtered_cnn_results(
     log_dir: str = "../datasets/ex002_cnn_logs",
     x_axis: str = "round",
     show_mean: bool = True,
+    plot_mean_only: Union[bool, str] = "auto",
+    table_mean_only: Union[bool, str] = "auto",
     save_path: Optional[str] = None,
 ) -> pd.DataFrame:
     """
@@ -848,13 +865,17 @@ def plot_filtered_cnn_results(
 
     Parameters
     ----------
-    selected_algos : 表示対象アルゴリズム名のリスト（None なら全手法）
-    selected_seeds : 表示対象シード値のリスト（None なら全シード）
-    x_axis         : "round" (グローバル反復数) または "comm" (累積通信ラウンド数)
-    show_mean      : 複数シード選択時に平均太線を表示するかどうか
-    save_path      : 画像保存先パス（None なら画面表示のみ）
+    selected_algos  : 表示対象アルゴリズム名のリスト（None なら全手法）
+    selected_seeds  : 表示対象シード値のリスト（None なら全シード）
+    x_axis          : "round" (グローバル反復数) または "comm" (累積通信ラウンド数)
+    show_mean       : 複数シード選択時に平均太線を表示するかどうか
+    plot_mean_only  : True=平均曲線のみ描画（複数シード時）, False=個別シードも描画, "auto"=selected_seedsがNoneのとき平均のみ
+    table_mean_only : True=返却表をアルゴリズム別平均のみに集約, False=シード別の行を出力, "auto"=selected_seedsがNoneのとき平均のみ
+    save_path       : 画像保存先パス（None なら画面表示のみ）
     """
     setup_japanese_matplotlib()
+    use_plot_mean_only = _resolve_mean_only_flag(plot_mean_only, selected_seeds, "plot_mean_only")
+    use_table_mean_only = _resolve_mean_only_flag(table_mean_only, selected_seeds, "table_mean_only")
     df = load_cnn_history_csv(history_csv_path=history_csv_path, log_dir=log_dir)
 
     if selected_algos is not None:
@@ -876,29 +897,37 @@ def plot_filtered_cnn_results(
 
     fig, axes = plt.subplots(1, 2, figsize=(15, 5.6))
     multi_seed = len(seeds_present) > 1
+    draw_mean = multi_seed and (show_mean or use_plot_mean_only)
+    draw_individuals = (not multi_seed) or (not use_plot_mean_only)
     seed_linestyles = ["-", "--", "-.", ":"]
 
     for algo in algos_present:
         col = DEFAULT_COLOR_MAP.get(algo, "#333333")
         sub_a = df[df["Algorithm"] == algo].sort_values(["Seed", "Round"])
-        for idx_s, s in enumerate(seeds_present):
-            sub_s = sub_a[sub_a["Seed"] == s]
-            if sub_s.empty:
-                continue
-            ls = seed_linestyles[idx_s % len(seed_linestyles)] if (multi_seed and len(seeds_present) <= 4) else "-"
-            lw = 1.1 if (multi_seed and show_mean) else 2.0
-            alpha = 0.55 if (multi_seed and show_mean) else 0.90
-            lbl = f"{algo} (seed={s})" if (not multi_seed or len(seeds_present) <= 3 or not show_mean) else None
-            axes[0].plot(sub_s[x_col], sub_s["Train_Loss"], color=col, linestyle=ls, linewidth=lw, alpha=alpha)
-            axes[1].plot(sub_s[x_col], sub_s["Test_Acc"], color=col, linestyle=ls, linewidth=lw, alpha=alpha, label=lbl)
+        if draw_individuals:
+            for idx_s, s in enumerate(seeds_present):
+                sub_s = sub_a[sub_a["Seed"] == s]
+                if sub_s.empty:
+                    continue
+                ls = seed_linestyles[idx_s % len(seed_linestyles)] if (multi_seed and len(seeds_present) <= 4) else "-"
+                lw = 1.1 if draw_mean else 2.0
+                alpha = 0.55 if draw_mean else 0.90
+                lbl = f"{algo} (seed={s})" if (not multi_seed or len(seeds_present) <= 3 or not draw_mean) else None
+                axes[0].plot(sub_s[x_col], sub_s["Train_Loss"], color=col, linestyle=ls, linewidth=lw, alpha=alpha)
+                axes[1].plot(sub_s[x_col], sub_s["Test_Acc"], color=col, linestyle=ls, linewidth=lw, alpha=alpha, label=lbl)
 
-        if multi_seed and show_mean:
+        if draw_mean:
             mean_df = sub_a.groupby("Round", as_index=False)[["Comm_Round", "Train_Loss", "Test_Acc"]].mean()
             lbl_m = f"{algo} (Ave, {len(seeds_present)} seeds)"
             axes[0].plot(mean_df[x_col], mean_df["Train_Loss"], color=col, linestyle="-", linewidth=2.3, alpha=0.95)
             axes[1].plot(mean_df[x_col], mean_df["Test_Acc"], color=col, linestyle="-", linewidth=2.3, alpha=0.95, label=lbl_m)
 
-    seed_desc = f"Seed={seeds_present[0]}" if len(seeds_present) == 1 else f"Seeds={seeds_present}"
+    if len(seeds_present) == 1:
+        seed_desc = f"Seed={seeds_present[0]}"
+    elif use_plot_mean_only:
+        seed_desc = f"全{len(seeds_present)}シード平均のみ" if selected_seeds is None else f"{len(seeds_present)}シード平均のみ (Seeds={seeds_present})"
+    else:
+        seed_desc = f"Seeds={seeds_present}"
     axes[0].set_title(f"(a) CompactCNN 訓練損失 絞り込み比較 ({seed_desc})", fontsize=11.5)
     axes[0].set_xlabel(x_label, fontsize=10.5)
     axes[0].set_ylabel("訓練損失 (Train Loss)", fontsize=10.5)
@@ -920,4 +949,22 @@ def plot_filtered_cnn_results(
 
     max_round = df.groupby(["Algorithm", "Seed"])["Round"].transform("max")
     final_df = df[df["Round"] == max_round][["Algorithm", "Seed", "Round", "Comm_Round", "Train_Loss", "Test_Acc"]].copy()
-    return final_df.sort_values(["Algorithm", "Seed"]).reset_index(drop=True)
+    final_df["Algorithm"] = pd.Categorical(final_df["Algorithm"], categories=algos_present, ordered=True)
+    if use_table_mean_only:
+        mean_tbl = (
+            final_df.groupby("Algorithm", as_index=False, observed=True)
+            .agg(
+                Seeds=("Seed", "count"),
+                Round=("Round", "max"),
+                Comm_Round=("Comm_Round", "mean"),
+                Train_Loss_Ave=("Train_Loss", "mean"),
+                Test_Acc_Ave=("Test_Acc", "mean"),
+            )
+            .sort_values("Algorithm")
+            .reset_index(drop=True)
+        )
+        mean_tbl["Algorithm"] = mean_tbl["Algorithm"].astype(str)
+        return mean_tbl
+    final_df = final_df.sort_values(["Algorithm", "Seed"]).reset_index(drop=True)
+    final_df["Algorithm"] = final_df["Algorithm"].astype(str)
+    return final_df

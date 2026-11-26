@@ -4,7 +4,7 @@ import os
 import sys
 import tempfile
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 if "MPLCONFIGDIR" not in os.environ:
     _mpl_dir = os.path.join(tempfile.gettempdir(), "fedsso_moq_mplconfig")
@@ -414,18 +414,46 @@ DEFAULT_COLOR_MAP_3: Dict[str, str] = {
 }
 
 
+def _resolve_mean_only_flag(
+    flag: Union[bool, str],
+    selected_seeds: Optional[List[int]],
+    param_name: str,
+) -> bool:
+    """'auto' / True / False を判定して平均のみモードの真偽値を返す。"""
+    if isinstance(flag, str):
+        if flag == "auto":
+            return selected_seeds is None
+        raise ValueError(f"{param_name} は True, False, または 'auto' を指定してください: {flag!r}")
+    if isinstance(flag, bool):
+        return flag
+    raise ValueError(f"{param_name} は True, False, または 'auto' を指定してください: {flag!r}")
+
+
+def _format_seed_desc(seeds_present: List[int], selected_seeds: Optional[List[int]], use_plot_mean_only: bool) -> str:
+    if len(seeds_present) == 1:
+        return f"Seed={seeds_present[0]}"
+    if use_plot_mean_only:
+        return f"全{len(seeds_present)}シード平均のみ" if selected_seeds is None else f"{len(seeds_present)}シード平均のみ (Seeds={seeds_present})"
+    return f"Seeds={seeds_present}"
+
+
 def plot_filtered_3a_momentum(
     selected_model: str = "CompactCNN",
     selected_algos: Optional[List[str]] = None,
     selected_seeds: Optional[List[int]] = None,
     per_seed_csv_path: str = "../datasets/ex003_momentum_sensitivity_per_seed.csv",
     show_mean: bool = True,
+    plot_mean_only: Union[bool, str] = "auto",
+    table_mean_only: Union[bool, str] = "auto",
     save_path: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     実験 3A のシード別CSVから特定モデル・アルゴリズム・シード値に絞って慣性感度グラフを描画する。
     """
     setup_japanese_matplotlib()
+    use_plot_mean_only = _resolve_mean_only_flag(plot_mean_only, selected_seeds, "plot_mean_only")
+    use_table_mean_only = _resolve_mean_only_flag(table_mean_only, selected_seeds, "table_mean_only")
+
     df = pd.read_csv(per_seed_csv_path)
     df = df[df["Model"] == selected_model]
     if selected_algos is not None:
@@ -437,40 +465,50 @@ def plot_filtered_3a_momentum(
 
     seeds_present = sorted(int(s) for s in df["Seed"].unique())
     algos_order = ["FedSSO", "FedSSO-MoQ", "FedSSO-AdaMoQ", "FedSSO-NAQ", "FedSSO-AdaNAQ"]
-    algos_present = [a for a in algos_order if a in set(df["Algorithm"])] + [
-        a for a in sorted(df["Algorithm"].unique()) if a not in algos_order
-    ]
+    algos_present = (
+        [a for a in selected_algos if a in set(df["Algorithm"])]
+        if selected_algos is not None
+        else [a for a in algos_order if a in set(df["Algorithm"])] + [a for a in sorted(df["Algorithm"].unique()) if a not in algos_order]
+    )
 
     fig, ax = plt.subplots(figsize=(9.5, 5.6))
     multi_seed = len(seeds_present) > 1
+    draw_mean = multi_seed and (show_mean or use_plot_mean_only)
+    draw_individuals = (not multi_seed) or (not use_plot_mean_only)
     seed_linestyles = ["-", "--", "-.", ":"]
 
     if "FedSSO" in algos_present:
         base_df = df[df["Algorithm"] == "FedSSO"]
         base_mean = float(base_df["Final_Acc"].mean())
-        ax.axhline(base_mean, color="#333333", linestyle=":", linewidth=1.8, label=f"FedSSO (μ=0 Ave={base_mean:.4f})")
+        base_lbl = (
+            f"FedSSO (μ=0, Seed={seeds_present[0]}={base_mean:.4f})"
+            if len(seeds_present) == 1
+            else f"FedSSO (μ=0 Ave={base_mean:.4f})"
+        )
+        ax.axhline(base_mean, color="#333333", linestyle=":", linewidth=1.8, label=base_lbl)
 
     for algo in algos_present:
         if algo == "FedSSO":
             continue
         col = DEFAULT_COLOR_MAP_3.get(algo, "#333333")
         sub_a = df[df["Algorithm"] == algo].sort_values(["Seed", "Param_Val"])
-        for idx_s, s in enumerate(seeds_present):
-            sub_s = sub_a[sub_a["Seed"] == s]
-            if sub_s.empty:
-                continue
-            ls = seed_linestyles[idx_s % len(seed_linestyles)] if (multi_seed and len(seeds_present) <= 4) else "-"
-            lw = 1.1 if (multi_seed and show_mean) else 2.0
-            alpha = 0.50 if (multi_seed and show_mean) else 0.90
-            marker = "o" if (not multi_seed or not show_mean) else None
-            lbl = f"{algo} (seed={s})" if (not multi_seed or len(seeds_present) <= 3 or not show_mean) else None
-            ax.plot(sub_s["Param_Val"], sub_s["Final_Acc"], color=col, linestyle=ls, linewidth=lw, alpha=alpha, marker=marker, label=lbl)
+        if draw_individuals:
+            for idx_s, s in enumerate(seeds_present):
+                sub_s = sub_a[sub_a["Seed"] == s]
+                if sub_s.empty:
+                    continue
+                ls = seed_linestyles[idx_s % len(seed_linestyles)] if (multi_seed and len(seeds_present) <= 4) else "-"
+                lw = 1.1 if draw_mean else 2.0
+                alpha = 0.50 if draw_mean else 0.90
+                marker = "o" if not draw_mean else None
+                lbl = f"{algo} (seed={s})" if (not multi_seed or len(seeds_present) <= 3 or not draw_mean) else None
+                ax.plot(sub_s["Param_Val"], sub_s["Final_Acc"], color=col, linestyle=ls, linewidth=lw, alpha=alpha, marker=marker, label=lbl)
 
-        if multi_seed and show_mean:
+        if draw_mean:
             m_df = sub_a.groupby("Param_Val", as_index=False)["Final_Acc"].mean().sort_values("Param_Val")
             ax.plot(m_df["Param_Val"], m_df["Final_Acc"], color=col, linestyle="-", linewidth=2.4, marker="o", label=f"{algo} (Ave, {len(seeds_present)} seeds)")
 
-    seed_desc = f"Seed={seeds_present[0]}" if len(seeds_present) == 1 else f"Seeds={seeds_present}"
+    seed_desc = _format_seed_desc(seeds_present, selected_seeds, use_plot_mean_only)
     ax.set_title(f"実験 3A 絞り込み ({selected_model}, 200r, {seed_desc})", fontsize=11.5)
     ax.set_xlabel("慣性パラメータ (μ または μ_max)", fontsize=10.5)
     ax.set_ylabel("最終テスト精度", fontsize=10.5)
@@ -483,17 +521,29 @@ def plot_filtered_3a_momentum(
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.show()
 
-    summary = (
-        df.groupby(["Model", "Algorithm", "Param_Name", "Param_Val"], as_index=False)
-        .agg(
-            Seeds=("Seed", "count"),
-            Acc_Ave=("Final_Acc", "mean"),
-            Acc_Best=("Final_Acc", "max"),
-            Acc_Worst=("Final_Acc", "min"),
-            Acc_Std=("Final_Acc", "std"),
+    df_out = df.copy()
+    df_out["Algorithm"] = pd.Categorical(df_out["Algorithm"], categories=algos_present, ordered=True)
+    if use_table_mean_only:
+        summary = (
+            df_out.groupby(["Model", "Algorithm", "Param_Name", "Param_Val"], as_index=False, observed=True)
+            .agg(
+                Seeds=("Seed", "count"),
+                Acc_Ave=("Final_Acc", "mean"),
+                Loss_Ave=("Final_Loss", "mean"),
+                Acc_Best=("Final_Acc", "max"),
+                Acc_Worst=("Final_Acc", "min"),
+            )
+            .sort_values(["Algorithm", "Param_Val"])
+            .reset_index(drop=True)
         )
-    )
-    return summary.sort_values(["Algorithm", "Param_Val"]).reset_index(drop=True)
+        summary["Algorithm"] = summary["Algorithm"].astype(str)
+        return summary
+    cols = ["Model", "Algorithm", "Param_Name", "Param_Val", "Seed", "Final_Acc", "Final_Loss"]
+    if "Diverged" in df_out.columns:
+        cols.append("Diverged")
+    out_df = df_out[cols].sort_values(["Algorithm", "Param_Val", "Seed"]).reset_index(drop=True)
+    out_df["Algorithm"] = out_df["Algorithm"].astype(str)
+    return out_df
 
 
 def plot_filtered_3b_memory(
@@ -501,12 +551,17 @@ def plot_filtered_3b_memory(
     selected_seeds: Optional[List[int]] = None,
     per_seed_csv_path: str = "../datasets/ex003_memory_size_per_seed.csv",
     show_mean: bool = True,
+    plot_mean_only: Union[bool, str] = "auto",
+    table_mean_only: Union[bool, str] = "auto",
     save_path: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     実験 3B のシード別CSVから特定のアルゴリズム・シード値に絞って履歴数 m の影響グラフを描画する。
     """
     setup_japanese_matplotlib()
+    use_plot_mean_only = _resolve_mean_only_flag(plot_mean_only, selected_seeds, "plot_mean_only")
+    use_table_mean_only = _resolve_mean_only_flag(table_mean_only, selected_seeds, "table_mean_only")
+
     df = pd.read_csv(per_seed_csv_path)
     if selected_algos is not None:
         df = df[df["Algorithm"].isin(selected_algos)]
@@ -517,12 +572,16 @@ def plot_filtered_3b_memory(
 
     seeds_present = sorted(int(s) for s in df["Seed"].unique())
     algos_order = ["FedSSO-LBFGS", "FedSSO-LNAQ", "FedSSO-LMoQ"]
-    algos_present = [a for a in algos_order if a in set(df["Algorithm"])] + [
-        a for a in sorted(df["Algorithm"].unique()) if a not in algos_order
-    ]
+    algos_present = (
+        [a for a in selected_algos if a in set(df["Algorithm"])]
+        if selected_algos is not None
+        else [a for a in algos_order if a in set(df["Algorithm"])] + [a for a in sorted(df["Algorithm"].unique()) if a not in algos_order]
+    )
 
     fig, axes = plt.subplots(1, 2, figsize=(14.5, 5.4))
     multi_seed = len(seeds_present) > 1
+    draw_mean = multi_seed and (show_mean or use_plot_mean_only)
+    draw_individuals = (not multi_seed) or (not use_plot_mean_only)
     seed_linestyles = ["-", "--", "-.", ":"]
     m_ticks = sorted(int(m) for m in df["m"].unique())
     m_labels = [str(m) for m in m_ticks]
@@ -530,24 +589,25 @@ def plot_filtered_3b_memory(
     for algo in algos_present:
         col = DEFAULT_COLOR_MAP_3.get(algo, "#333333")
         sub_a = df[df["Algorithm"] == algo].sort_values(["Seed", "m"])
-        for idx_s, s in enumerate(seeds_present):
-            sub_s = sub_a[sub_a["Seed"] == s]
-            if sub_s.empty:
-                continue
-            ls = seed_linestyles[idx_s % len(seed_linestyles)] if (multi_seed and len(seeds_present) <= 4) else "-"
-            lw = 1.1 if (multi_seed and show_mean) else 2.0
-            alpha = 0.50 if (multi_seed and show_mean) else 0.90
-            marker = "o" if (not multi_seed or not show_mean) else None
-            lbl = f"{algo} (seed={s})" if (not multi_seed or len(seeds_present) <= 3 or not show_mean) else None
-            axes[0].plot(sub_s["m"], sub_s["Final_Acc"], color=col, linestyle=ls, linewidth=lw, alpha=alpha, marker=marker, label=lbl)
-            axes[1].plot(sub_s["m"], sub_s["Server_Time_ms"], color=col, linestyle=ls, linewidth=lw, alpha=alpha, marker="s" if marker else None)
+        if draw_individuals:
+            for idx_s, s in enumerate(seeds_present):
+                sub_s = sub_a[sub_a["Seed"] == s]
+                if sub_s.empty:
+                    continue
+                ls = seed_linestyles[idx_s % len(seed_linestyles)] if (multi_seed and len(seeds_present) <= 4) else "-"
+                lw = 1.1 if draw_mean else 2.0
+                alpha = 0.50 if draw_mean else 0.90
+                marker = "o" if not draw_mean else None
+                lbl = f"{algo} (seed={s})" if (not multi_seed or len(seeds_present) <= 3 or not draw_mean) else None
+                axes[0].plot(sub_s["m"], sub_s["Final_Acc"], color=col, linestyle=ls, linewidth=lw, alpha=alpha, marker=marker, label=lbl)
+                axes[1].plot(sub_s["m"], sub_s["Server_Time_ms"], color=col, linestyle=ls, linewidth=lw, alpha=alpha, marker="s" if marker else None)
 
-        if multi_seed and show_mean:
+        if draw_mean:
             m_df = sub_a.groupby("m", as_index=False)[["Final_Acc", "Server_Time_ms"]].mean().sort_values("m")
             axes[0].plot(m_df["m"], m_df["Final_Acc"], color=col, linestyle="-", linewidth=2.4, marker="o", label=f"{algo} (Ave, {len(seeds_present)} seeds)")
             axes[1].plot(m_df["m"], m_df["Server_Time_ms"], color=col, linestyle="-", linewidth=2.4, marker="s", label=f"{algo} (Ave)")
 
-    seed_desc = f"Seed={seeds_present[0]}" if len(seeds_present) == 1 else f"Seeds={seeds_present}"
+    seed_desc = _format_seed_desc(seeds_present, selected_seeds, use_plot_mean_only)
     for ax in axes:
         ax.set_xscale("log", base=2)
         ax.set_xticks(m_ticks)
@@ -562,7 +622,7 @@ def plot_filtered_3b_memory(
 
     axes[1].set_title(f"(b) 実験 3B サーバ計算時間 絞り込み ({seed_desc})", fontsize=11.5)
     axes[1].set_ylabel("平均サーバ計算時間 (ms/iter)", fontsize=10.5)
-    if multi_seed and show_mean:
+    if draw_mean:
         axes[1].legend(loc="upper left", fontsize=8.5, framealpha=0.92)
 
     plt.tight_layout()
@@ -570,17 +630,28 @@ def plot_filtered_3b_memory(
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.show()
 
-    summary = (
-        df.groupby(["Algorithm", "m"], as_index=False)
-        .agg(
-            Seeds=("Seed", "count"),
-            Acc_Ave=("Final_Acc", "mean"),
-            Acc_Best=("Final_Acc", "max"),
-            Acc_Worst=("Final_Acc", "min"),
-            Server_Time_ms=("Server_Time_ms", "mean"),
+    df_out = df.copy()
+    df_out["Algorithm"] = pd.Categorical(df_out["Algorithm"], categories=algos_present, ordered=True)
+    if use_table_mean_only:
+        summary = (
+            df_out.groupby(["Algorithm", "m"], as_index=False, observed=True)
+            .agg(
+                Seeds=("Seed", "count"),
+                Acc_Ave=("Final_Acc", "mean"),
+                Loss_Ave=("Final_Loss", "mean"),
+                Acc_Best=("Final_Acc", "max"),
+                Acc_Worst=("Final_Acc", "min"),
+                Server_Time_ms=("Server_Time_ms", "mean"),
+            )
+            .sort_values(["Algorithm", "m"])
+            .reset_index(drop=True)
         )
-    )
-    return summary.sort_values(["Algorithm", "m"]).reset_index(drop=True)
+        summary["Algorithm"] = summary["Algorithm"].astype(str)
+        return summary
+    cols = ["Algorithm", "m", "Seed", "Final_Acc", "Final_Loss", "Server_Time_ms"]
+    out_df = df_out[cols].sort_values(["Algorithm", "m", "Seed"]).reset_index(drop=True)
+    out_df["Algorithm"] = out_df["Algorithm"].astype(str)
+    return out_df
 
 
 def plot_filtered_3c_ablation(
@@ -590,12 +661,17 @@ def plot_filtered_3c_ablation(
     history_csv_path: str = "../datasets/ex003_curvature_ablation_history.csv",
     log_dir: str = "../datasets/ex003_curvature_logs",
     show_mean: bool = True,
+    plot_mean_only: Union[bool, str] = "auto",
+    table_mean_only: Union[bool, str] = "auto",
     save_path: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     実験 3C の学習曲線履歴CSV（無ければシード別CSV群）から特定のアルゴリズム・条件・シード値に絞って学習曲線を描画する。
     """
     setup_japanese_matplotlib()
+    use_plot_mean_only = _resolve_mean_only_flag(plot_mean_only, selected_seeds, "plot_mean_only")
+    use_table_mean_only = _resolve_mean_only_flag(table_mean_only, selected_seeds, "table_mean_only")
+
     if history_csv_path and os.path.isfile(history_csv_path):
         df = pd.read_csv(history_csv_path)
     elif log_dir and os.path.isdir(log_dir):
@@ -634,13 +710,15 @@ def plot_filtered_3c_ablation(
     conds_present = [c for c in cond_styles if c[0] in set(df["Condition"])]
     seeds_present = sorted(int(s) for s in df["Seed"].unique())
     multi_seed = len(seeds_present) > 1
+    draw_mean = multi_seed and (show_mean or use_plot_mean_only)
+    draw_individuals = (not multi_seed) or (not use_plot_mean_only)
 
     n_alg = len(algos_present)
     ncols = min(4, n_alg)
     nrows = (n_alg + ncols - 1) // ncols
     fig, axes = plt.subplots(nrows, ncols, figsize=(4.8 * ncols, 4.4 * nrows), squeeze=False)
 
-    seed_desc = f"Seed={seeds_present[0]}" if len(seeds_present) == 1 else f"Seeds={seeds_present}"
+    seed_desc = _format_seed_desc(seeds_present, selected_seeds, use_plot_mean_only)
     for idx_a, algo in enumerate(algos_present):
         ax = axes[idx_a // ncols][idx_a % ncols]
         sub_a = df[df["Algorithm"] == algo]
@@ -648,15 +726,16 @@ def plot_filtered_3c_ablation(
             sub_c = sub_a[sub_a["Condition"] == cond_name].sort_values(["Seed", "Round"])
             if sub_c.empty:
                 continue
-            for s in seeds_present:
-                sub_s = sub_c[sub_c["Seed"] == s]
-                if sub_s.empty:
-                    continue
-                lw = 0.8 if (multi_seed and show_mean) else 1.8
-                alpha = 0.35 if (multi_seed and show_mean) else 0.90
-                lbl = f"{cond_name} (s={s})" if (not multi_seed or len(seeds_present) <= 2 or not show_mean) else None
-                ax.plot(sub_s["Round"], sub_s["Test_Acc"], color=col, linestyle=ls, linewidth=lw, alpha=alpha, label=lbl)
-            if multi_seed and show_mean:
+            if draw_individuals:
+                for s in seeds_present:
+                    sub_s = sub_c[sub_c["Seed"] == s]
+                    if sub_s.empty:
+                        continue
+                    lw = 0.8 if draw_mean else 1.8
+                    alpha = 0.35 if draw_mean else 0.90
+                    lbl = f"{cond_name} (s={s})" if (not multi_seed or len(seeds_present) <= 2 or not draw_mean) else None
+                    ax.plot(sub_s["Round"], sub_s["Test_Acc"], color=col, linestyle=ls, linewidth=lw, alpha=alpha, label=lbl)
+            if draw_mean:
                 m_df = sub_c.groupby("Round", as_index=False)["Test_Acc"].mean().sort_values("Round")
                 ax.plot(m_df["Round"], m_df["Test_Acc"], color=col, linestyle=ls, linewidth=2.1, alpha=0.95, label=f"{cond_name} (Ave)")
 
@@ -676,14 +755,27 @@ def plot_filtered_3c_ablation(
     plt.show()
 
     max_round = df.groupby(["Algorithm", "Condition", "Seed"])["Round"].transform("max")
-    final_df = df[df["Round"] == max_round]
-    summary = (
-        final_df.groupby(["Algorithm", "Condition"], as_index=False)
-        .agg(
-            Seeds=("Seed", "count"),
-            Acc_Ave=("Test_Acc", "mean"),
-            Acc_Best=("Test_Acc", "max"),
-            Acc_Worst=("Test_Acc", "min"),
+    final_df = df[df["Round"] == max_round].copy()
+    final_df["Algorithm"] = pd.Categorical(final_df["Algorithm"], categories=algos_present, ordered=True)
+    if use_table_mean_only:
+        summary = (
+            final_df.groupby(["Algorithm", "Condition"], as_index=False, observed=True)
+            .agg(
+                Seeds=("Seed", "count"),
+                Round=("Round", "max"),
+                Test_Acc_Ave=("Test_Acc", "mean"),
+                Acc_Best=("Test_Acc", "max"),
+                Acc_Worst=("Test_Acc", "min"),
+            )
+            .sort_values(["Algorithm", "Condition"])
+            .reset_index(drop=True)
         )
+        summary["Algorithm"] = summary["Algorithm"].astype(str)
+        return summary
+    out_df = (
+        final_df[["Algorithm", "Condition", "Seed", "Round", "Test_Acc"]]
+        .sort_values(["Algorithm", "Condition", "Seed"])
+        .reset_index(drop=True)
     )
-    return summary.sort_values(["Algorithm", "Condition"]).reset_index(drop=True)
+    out_df["Algorithm"] = out_df["Algorithm"].astype(str)
+    return out_df
